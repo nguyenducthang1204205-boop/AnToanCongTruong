@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 9
+names: ['Gloves', 'Helmet', 'Person', 'Safety Boot', 'Safety Vest', 'bare-arms', 'no-boot', 'no-helmet', 'no-vest']
+
+roboflow:
+  workspace: thang-nguyen-wrkwt
+  project: construction-safety-1-spjty
+  version: 1
+  license: CC BY 4.0
+  url: https://app.roboflow.com/thang-nguyen-wrkwt/construction-safety-1-spjty/1
