@@ -8,6 +8,6 @@ names: ['Gloves', 'Helmet', 'Person', 'Safety Boot', 'Safety Vest', 'bare-arms',
 roboflow:
   workspace: thang-nguyen-wrkwt
   project: construction-safety-1-spjty
-  version: 1
+  version: 2
   license: CC BY 4.0
-  url: https://app.roboflow.com/thang-nguyen-wrkwt/construction-safety-1-spjty/1
+  url: https://app.roboflow.com/thang-nguyen-wrkwt/construction-safety-1-spjty/2
