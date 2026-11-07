@@ -11,12 +11,12 @@ Bản web này chạy trên [Streamlit Community Cloud](https://streamlit.io/clo
 | Tab | Mô tả |
 |---|---|
 | 🖼️ Ảnh | Tải một hoặc nhiều ảnh (hoặc chọn ảnh mẫu). Nhiều ảnh thì có phần tổng hợp: tỷ lệ tuân thủ và biểu đồ trang bị bị thiếu. Kết quả từng ảnh gồm ảnh đã đánh dấu, trạng thái AN TOÀN / CẢNH BÁO, bảng ✔/✘ cho từng công nhân, nút tải ảnh kết quả và nhật ký CSV |
-| 🎞️ Video | Phân tích toàn bộ video, nên video kết quả dài đúng bằng video gốc. Hai video đặt cạnh nhau và phát cùng lúc (phát, tạm dừng, tua ở một bên thì bên kia làm theo). Kết quả gồm video đã đánh dấu, biểu đồ diễn biến vi phạm theo từng giây, biểu đồ trang bị bị thiếu, phần **Mô hình trên video này** (độ tin cậy theo thời gian và theo lớp, thời gian suy luận, tỷ lệ tuân thủ, dòng thời gian vi phạm theo trang bị, bản đồ nhiệt vị trí vi phạm), ảnh các khoảnh khắc vi phạm và nhật ký cảnh báo |
+| 🎞️ Video | Phân tích toàn bộ video, nên video kết quả dài đúng bằng video gốc. Video gốc đặt cạnh video của YOLOv11n; có thể chạy thêm **YOLOv3-tiny** và **YOLOv5n** (cùng bộ dữ liệu, cùng cách huấn luyện) để so sánh, mỗi mô hình một video có ghi tên mô hình. Các video phát cùng lúc (phát, tạm dừng, tua ở một video thì các video còn lại làm theo). Kết quả gồm video đã đánh dấu, biểu đồ diễn biến vi phạm theo từng giây, biểu đồ trang bị bị thiếu, phần **Mô hình trên video này** (độ tin cậy theo thời gian và theo lớp, thời gian suy luận, tỷ lệ tuân thủ, dòng thời gian vi phạm theo trang bị, bản đồ nhiệt vị trí vi phạm), ảnh các khoảnh khắc vi phạm và nhật ký cảnh báo |
 | 📷 Camera | **Video trực tiếp** qua WebRTC (mặc định). Nếu mạng chặn WebRTC thì dùng **Tự chụp mỗi giây**. Bảng trạng thái, ảnh cảnh báo gần nhất và nhật ký tự cập nhật |
 
 ### Trang Hiệu năng mô hình
 
-Số liệu thật của lần huấn luyện và đánh giá (`assets/mo_hinh/`, số theo lớp lấy từ kết quả `model.val()` trong notebook): Precision, Recall, mAP50, mAP50-95 trên tập val / test; so sánh mô hình mới (v2, huấn luyện lại sau khi thêm 91 ảnh tự gán nhãn) với mô hình cũ (v1), cả về chỉ số nhận diện lẫn kết luận tuân thủ của từng công nhân; biểu đồ từng lớp; bản đồ nhiệt lớp × chỉ số; phân bố dữ liệu; đường cong huấn luyện 50 epoch; và các biểu đồ gốc của Ultralytics (ma trận nhầm lẫn, đường PR / F1 / P / R, results.png).
+Số liệu thật của lần huấn luyện và đánh giá (`assets/mo_hinh/`, số theo lớp lấy từ kết quả `model.val()` trong notebook): Precision, Recall, mAP50, mAP50-95 trên tập val / test; biểu đồ từng lớp; bản đồ nhiệt lớp × chỉ số; phân bố dữ liệu; đường cong huấn luyện 50 epoch; và các biểu đồ gốc của Ultralytics (ma trận nhầm lẫn, đường PR / F1 / P / R, results.png).
 
 ### Khi chế độ Video trực tiếp không lên hình
 

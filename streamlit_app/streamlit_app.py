@@ -68,6 +68,19 @@ def nap_logic_notebook():
 
 core, khoa_mo_hinh = nap_logic_notebook()
 
+# Mô hình so sánh trên video (notebook "So sánh mô hình": cùng bộ dữ liệu, cùng cách huấn luyện, cùng 9 lớp nên
+# dùng chung logic tuân thủ). Số thứ hai là GFLOPs so với YOLOv11n (bang_so_sanh.csv), để ước tính thời gian.
+TEN_MO_HINH_CHINH = "YOLOv11n"
+MO_HINH_SO_SANH = {"YOLOv3-tiny": ("runs/detect/so_sanh/1_YOLOv3-tiny/train/weights/best.pt", 2.9),
+                   "YOLOv5n": ("runs/detect/so_sanh/2_YOLOv5n/train/weights/best.pt", 1.1)}
+
+
+@st.cache_resource(show_spinner="Đang nạp các mô hình so sánh…")
+def nap_mo_hinh_so_sanh():
+    """Chỉ nạp khi cần (phân tích video có chọn mô hình so sánh) để đỡ tốn RAM của máy chủ miễn phí."""
+    from ultralytics import YOLO
+    return {ten: YOLO(str(APP_DIR / duong_dan)) for ten, (duong_dan, _) in MO_HINH_SO_SANH.items()}
+
 
 def phan_tich(frame, conf, ve=True):
     with khoa_mo_hinh:
@@ -97,6 +110,13 @@ def phan_tich_ghi_lai(frame, conf):
         ghi = GhiPhatHien(core.detector)
         report = core.phan_tich_khung_hinh(ghi, frame, conf=conf)
     return report, core.ve_ket_qua(frame, report), ghi.phat_hien, ghi.ms
+
+
+def ghi_ten_mo_hinh(anh, ten):
+    """Ghi tên mô hình ở góc dưới bên trái khung hình, để video tải về vẫn biết là của mô hình nào."""
+    h, w = anh.shape[:2]
+    core.ghi_nhan(anh, f" {ten} ", 10, h - 10, (40, 40, 40), max(0.45, min(w, h) / 1400) * 2)
+    return anh
 
 
 def ve_ban_do_nhiet(nen, luoi):
@@ -307,38 +327,88 @@ def thoi_luong_video(file_id, duoi, _du_lieu):
         shutil.rmtree(thu_muc, ignore_errors=True)
 
 
-# Phát hai video cùng lúc: tìm thẻ <video> trong hai container (class st-key-…) và nối các sự kiện phát / dừng /
-# tua / đổi tốc độ của video này sang video kia. Component v2 chạy ngay trong trang (không nằm trong iframe) nên
-# truy cập được các st.video. Video gốc làm mốc: khi đang phát mà lệch quá 0,3 giây thì kéo video kết quả về khớp.
+# Phát các video cùng lúc: tìm thẻ <video> trong từng container (class st-key-…) và khi người xem phát / dừng / tua /
+# đổi tốc độ ở một video thì làm y như vậy với các video còn lại. Component v2 chạy ngay trong trang (không nằm trong
+# iframe) nên truy cập được các st.video.
+# - Mỗi lần đoạn mã này tự phát / dừng / tua / đổi tốc độ một video, nó ghi lại đúng sự kiện sẽ phát sinh trên video
+#   đó (hạn 1 giây) và bỏ qua đúng sự kiện ấy. Nếu không, với 4 video các lệnh dội qua lại và chúng tua nhau mãi.
+#   Không dùng "bỏ qua mọi sự kiện trong một khoảng thời gian": khi mạng chậm video so sánh liên tục được chỉnh lệch
+#   nên gần như lúc nào cũng bị bỏ qua, và cú bấm thật của người xem trên video đó bị nuốt mất.
+# - Video gốc có tiếng nên trình duyệt có thể chặn play() không đến từ cú bấm trực tiếp: khi đó tắt tiếng rồi phát.
+# - Cứ 0,5 giây lấy video gốc làm mốc: video nào khác trạng thái phát / dừng, tốc độ, hoặc lệch quá 0,4 giây thì kéo
+#   về khớp (bỏ qua video đang tua để không giật).
 DONG_BO_VIDEO_JS = """
 export default function(component) {
-    const [lopGoc, lopKetQua] = component.data.lop;
-    let goc = null, ketQua = null, huy = null;
+    const lop = component.data.lop;
+    let ds = [], huy = null;
+    const cho = new WeakMap();  // video -> {loại sự kiện: [hạn, …]} do chính đoạn mã này gây ra
+    const doiSuKien = (v, loai) => {
+        const m = cho.get(v) || {};
+        (m[loai] = m[loai] || []).push(performance.now() + 1000);
+        cho.set(v, m);
+    };
+    const laDoMinh = (v, loai) => {
+        const han = (cho.get(v) || {})[loai] || [];
+        while (han.length && han[0] < performance.now()) han.shift();
+        return han.length > 0 && han.shift() > 0;
+    };
+    const phat = v => {
+        if (!v.paused) return;
+        doiSuKien(v, 'play');
+        v.play().catch(e => {
+            if (e.name !== 'NotAllowedError' || v.muted) return;
+            laDoMinh(v, 'play');  // bị chặn thì không có sự kiện play
+            v.muted = true;
+            doiSuKien(v, 'play');
+            v.play().catch(() => {});
+        });
+    };
+    const dung = v => { if (!v.paused) { doiSuKien(v, 'pause'); v.pause(); } };
+    const khopThoiGian = (nguon, v, nguong = 0.1) => {
+        if (Math.abs(v.currentTime - nguon.currentTime) > nguong) {
+            doiSuKien(v, 'seeking');
+            v.currentTime = nguon.currentTime;
+        }
+    };
+    const khopTocDo = (nguon, v) => {
+        if (v.playbackRate !== nguon.playbackRate) {
+            doiSuKien(v, 'ratechange');
+            v.playbackRate = nguon.playbackRate;
+        }
+    };
 
-    const noi = (nguon, dich, signal) => {
-        const khop = () => {
-            if (Math.abs(dich.currentTime - nguon.currentTime) > 0.1) dich.currentTime = nguon.currentTime;
-        };
-        nguon.addEventListener('play', () => { khop(); if (dich.paused) dich.play().catch(() => {}); }, { signal });
-        nguon.addEventListener('pause', () => { if (!dich.paused && !nguon.ended) dich.pause(); }, { signal });
-        nguon.addEventListener('seeking', khop, { signal });
-        nguon.addEventListener('ratechange', () => {
-            if (dich.playbackRate !== nguon.playbackRate) dich.playbackRate = nguon.playbackRate;
+    const noi = (nguon, signal) => {
+        const nghe = (loai, viec) => nguon.addEventListener(loai, () => {
+            if (laDoMinh(nguon, loai)) return;
+            for (const v of ds) if (v !== nguon) viec(v);
         }, { signal });
+        nghe('play', v => { khopThoiGian(nguon, v); phat(v); });
+        nghe('pause', v => { if (!nguon.ended) { dung(v); khopThoiGian(nguon, v); } });
+        nghe('seeking', v => khopThoiGian(nguon, v));
+        nghe('ratechange', v => khopTocDo(nguon, v));
+    };
+
+    const giuKhop = () => {
+        const goc = ds[0];
+        if (goc.seeking || goc.ended) return;
+        for (const v of ds.slice(1)) {
+            if (v.seeking || v.ended) continue;
+            if (goc.paused) dung(v); else phat(v);
+            khopThoiGian(goc, v, goc.paused ? 0.05 : 0.4);
+            khopTocDo(goc, v);
+        }
     };
 
     const kiemTra = () => {
-        const a = document.querySelector(`.${lopGoc} video`);
-        const b = document.querySelector(`.${lopKetQua} video`);
-        if (!a || !b) return;
-        if (a !== goc || b !== ketQua) {  // lần đầu, hoặc Streamlit vừa vẽ lại thẻ video
+        const moi = lop.map(l => document.querySelector(`.${l} video`));
+        if (moi.some(v => !v)) return;
+        if (moi.some((v, i) => v !== ds[i])) {  // lần đầu, hoặc Streamlit vừa vẽ lại thẻ video
             if (huy) huy.abort();
             huy = new AbortController();
-            goc = a; ketQua = b;
-            noi(goc, ketQua, huy.signal);
-            noi(ketQua, goc, huy.signal);
-        } else if (!goc.paused && !ketQua.paused && Math.abs(goc.currentTime - ketQua.currentTime) > 0.3) {
-            ketQua.currentTime = goc.currentTime;
+            ds = moi;
+            for (const v of ds) { v.preload = 'auto'; noi(v, huy.signal); }
+        } else {
+            giuKhop();
         }
     };
     kiemTra();
@@ -358,18 +428,20 @@ def dinh_dang_thoi_luong(giay):
     return f"{phut} phút {giay:02d} giây" if phut else f"{giay} giây"
 
 
-def phan_tich_video(du_lieu, ten, conf, chu_ky, khung_moi_giay, thanh_tien_do):
+def phan_tich_video(du_lieu, ten, conf, chu_ky, khung_moi_giay, thanh_tien_do, mo_hinh_khac=None):
     """Giống giam_sat_video của notebook. Phân tích toàn bộ video và ghi đủ mọi khung hình với cùng fps, nên video
     kết quả dài đúng bằng video gốc. Để kịp trên CPU, chỉ chạy mô hình `khung_moi_giay` lần mỗi giây;
-    các khung ở giữa vẽ lại kết quả gần nhất nên video vẫn mượt."""
+    các khung ở giữa vẽ lại kết quả gần nhất nên video vẫn mượt. `mo_hinh_khac` ({tên: mô hình}) chạy trên đúng
+    các khung đó và ra thêm một video kết quả mỗi mô hình (không ghi nhật ký, không vẽ biểu đồ)."""
     thu_muc = Path(tempfile.mkdtemp())
     try:
-        return _phan_tich_video(thu_muc, du_lieu, ten, conf, chu_ky, khung_moi_giay, thanh_tien_do)
+        return _phan_tich_video(thu_muc, du_lieu, ten, conf, chu_ky, khung_moi_giay, thanh_tien_do,
+                                mo_hinh_khac or {})
     finally:
         shutil.rmtree(thu_muc, ignore_errors=True)  # video dài để lại file tạm lớn trên máy chủ
 
 
-def _phan_tich_video(thu_muc, du_lieu, ten, conf, chu_ky, khung_moi_giay, thanh_tien_do):
+def _phan_tich_video(thu_muc, du_lieu, ten, conf, chu_ky, khung_moi_giay, thanh_tien_do, mo_hinh_khac):
     vao, tam, ra = thu_muc / f"vao{Path(ten).suffix or '.mp4'}", thu_muc / "tam.mp4", thu_muc / "ra.mp4"
     vao.write_bytes(du_lieu)
 
@@ -389,6 +461,10 @@ def _phan_tich_video(thu_muc, du_lieu, ten, conf, chu_ky, khung_moi_giay, thanh_
     phat_hien, thoi_gian_suy_luan, thieu_theo_lan = [], [], []
     luoi, nen, nhieu_vp_nhat = None, None, -1
     cong_nhan_dat = cong_nhan_tong = 0
+    khac = {ten_mh: {"mo_hinh": mh, "tam": thu_muc / f"tam_{i}.mp4", "ra": thu_muc / f"ra_{i}.mp4", "writer": None,
+                     "report": None, "vp_frames": 0, "so_lan_chay": 0, "ms": [], "tin_cay": [],
+                     "cong_nhan_tong": 0, "cong_nhan_dat": 0}
+            for i, (ten_mh, mh) in enumerate(mo_hinh_khac.items())}
     try:
         while True:
             ok, frame = cap.read()
@@ -428,10 +504,24 @@ def _phan_tich_video(thu_muc, du_lieu, ten, conf, chu_ky, khung_moi_giay, thanh_
             else:
                 annotated = core.ve_ket_qua(frame, report)
             vp_frames += report["canh_bao"]
+            h, w = annotated.shape[:2]
             if writer is None:
-                h, w = annotated.shape[:2]
                 writer = cv2.VideoWriter(str(tam), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-            writer.write(annotated)
+            writer.write(ghi_ten_mo_hinh(annotated, TEN_MO_HINH_CHINH))
+            for ten_mh, k in khac.items():
+                if frames % buoc == 0:
+                    with khoa_mo_hinh:
+                        ghi = GhiPhatHien(k["mo_hinh"])
+                        k["report"] = core.phan_tich_khung_hinh(ghi, frame, conf=conf)
+                    k["so_lan_chay"] += 1
+                    k["ms"].append(ghi.ms)
+                    k["tin_cay"] += [c for _, c in ghi.phat_hien]
+                    k["cong_nhan_tong"] += k["report"]["so_cong_nhan"]
+                    k["cong_nhan_dat"] += k["report"]["so_cong_nhan"] - k["report"]["so_nguoi_vi_pham"]
+                k["vp_frames"] += k["report"]["canh_bao"]
+                if k["writer"] is None:
+                    k["writer"] = cv2.VideoWriter(str(k["tam"]), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+                k["writer"].write(ghi_ten_mo_hinh(core.ve_ket_qua(frame, k["report"]), ten_mh))
             frames += 1
             if frames % 10 == 0:
                 thanh_tien_do.progress(min(frames / tong, 1.0) * 0.95 if tong else 0.5,
@@ -441,11 +531,24 @@ def _phan_tich_video(thu_muc, du_lieu, ten, conf, chu_ky, khung_moi_giay, thanh_
         cap.release()
         if writer is not None:
             writer.release()
+        for k in khac.values():
+            if k["writer"] is not None:
+                k["writer"].release()
     if frames == 0:
         return None
     thanh_tien_do.progress(0.97, text="Đang xuất video kết quả…")
     sang_h264(tam, ra)
+    ket_qua_khac = {}
+    for ten_mh, k in khac.items():
+        sang_h264(k["tam"], k["ra"])
+        ms_mh = sorted(k["ms"])
+        ket_qua_khac[ten_mh] = {
+            "video": k["ra"].read_bytes(), "vp_frames": k["vp_frames"], "so_lan_chay": k["so_lan_chay"],
+            "ms_trung_vi": ms_mh[len(ms_mh) // 2] if ms_mh else None,
+            "tin_cay_tb": sum(k["tin_cay"]) / len(k["tin_cay"]) if k["tin_cay"] else None,
+            "ty_le_tuan_thu": k["cong_nhan_dat"] / k["cong_nhan_tong"] if k["cong_nhan_tong"] else None}
     return {"video": ra.read_bytes(), "ten": ten, "frames": frames, "vp_frames": vp_frames, "tong": tong,
+            "mo_hinh_khac": ket_qua_khac,
             "fps": fps, "so_lan_chay": so_lan_chay, "canh_bao": canh_bao, "rows": rows,
             "dien_bien": dien_bien, "dem_thieu": dict(dem_thieu), "phat_hien": phat_hien,
             "thoi_gian_suy_luan": thoi_gian_suy_luan, "thieu_theo_lan": thieu_theo_lan,
@@ -655,25 +758,25 @@ CSS = """
 <style>
   .block-container {padding-top: 4.5rem; max-width: 1320px}
   [data-testid="stImageCaption"] {font-size: .85rem}
-  /* Phần đầu trang: khung tối cố định ở cả hai giao diện, sọc cảnh báo cam/đen như băng rào công trường */
+  /* Phần đầu trang: khung tối cố định ở cả hai giao diện, sọc xanh nước biển/đen như băng rào công trường */
   .hero {position: relative; overflow: hidden; display: flex; gap: 32px; justify-content: space-between;
          padding: 30px 32px 26px; margin-bottom: 1.4rem; border-radius: 18px; color: #f8fafc;
          border: 1px solid rgba(148, 163, 184, .18);
-         background: radial-gradient(640px 260px at 100% 0%, rgba(234, 88, 12, .32), transparent 70%),
+         background: radial-gradient(640px 260px at 100% 0%, rgba(14, 165, 233, .32), transparent 70%),
                      linear-gradient(135deg, #0b1220 0%, #111c33 55%, #1b2740 100%)}
   .hero::before {content: ""; position: absolute; inset: 0 0 auto 0; height: 6px;
-                 background: repeating-linear-gradient(135deg, #ea580c 0 14px, #0b1220 14px 28px)}
+                 background: repeating-linear-gradient(135deg, #0ea5e9 0 14px, #0b1220 14px 28px)}
   .hero .trai {display: flex; gap: 18px; align-items: flex-start; min-width: 0}
   .hero .logo {flex: none; display: grid; place-items: center; width: 58px; height: 58px; border-radius: 16px;
-               background: linear-gradient(160deg, #f97316, #c2410c); color: #fff;
-               box-shadow: 0 10px 30px -8px rgba(234, 88, 12, .6)}
-  .hero .nho {font-size: .74rem; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: #fdba74}
+               background: linear-gradient(160deg, #0ea5e9, #0369a1); color: #fff;
+               box-shadow: 0 10px 30px -8px rgba(14, 165, 233, .6)}
+  .hero .nho {font-size: .74rem; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: #7dd3fc}
   .hero h1 {color: #fff; font-size: 1.9rem; line-height: 1.2; margin: .3rem 0 .45rem; padding: 0; text-wrap: balance}
   .hero p {color: #cbd5e1; max-width: 600px; margin: 0 0 .9rem; font-size: .98rem}
   .hero .the-ppe {display: inline-flex; align-items: center; gap: 6px; margin: 0 6px 6px 0; padding: 3px 11px;
                   border-radius: 999px; border: 1px solid rgba(148, 163, 184, .35); color: #e2e8f0;
                   background: rgba(15, 23, 42, .45); font-size: .8rem; font-weight: 500}
-  .hero .the-ppe::before {content: ""; width: 6px; height: 6px; border-radius: 50%; background: #f97316}
+  .hero .the-ppe::before {content: ""; width: 6px; height: 6px; border-radius: 50%; background: #38bdf8}
   .hero .so {flex: none; display: grid; grid-template-columns: repeat(2, 148px); gap: 12px; align-self: center}
   .hero .o {padding: 12px 16px; border-radius: 12px; background: rgba(255, 255, 255, .04);
             border: 1px solid rgba(148, 163, 184, .18)}
@@ -684,8 +787,8 @@ CSS = """
   .muc .nho {font-size: .72rem; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; opacity: .6}
   .muc h3 {font-size: 1.25rem; margin: .15rem 0 .1rem; padding: 0}
   .muc p {margin: 0; opacity: .72; font-size: .92rem}
-  .nhan-xet {padding: 12px 16px; border-radius: 12px; border-left: 4px solid #ea580c;
-             background: rgba(234, 88, 12, .08); font-size: .93rem; margin: .4rem 0 .2rem}
+  .nhan-xet {padding: 12px 16px; border-radius: 12px; border-left: 4px solid #0284c7;
+             background: rgba(2, 132, 199, .08); font-size: .93rem; margin: .4rem 0 .2rem}
   .trang-thai {display: flex; align-items: center; gap: 14px; color: #fff; border-radius: 12px;
                padding: 12px 16px; margin-bottom: .25rem}
   .trang-thai svg {flex: none}
@@ -834,6 +937,17 @@ def trang_giam_sat():
     chan_trang()
 
 
+def tom_tat_mo_hinh(vp_frames, frames, ty_le_tuan_thu, ms):
+    """Một dòng dưới video kết quả của mỗi mô hình. Video không có nhãn đúng nên chỉ là kết luận của mô hình, không
+    phải độ chính xác."""
+    phan = [f"Khung có vi phạm **{bd.phan_tram(vp_frames / frames, 0)}**"]
+    if ty_le_tuan_thu is not None:
+        phan.append(f"tuân thủ **{bd.phan_tram(ty_le_tuan_thu, 0)}**")
+    if ms is not None:
+        phan.append(f"suy luận **{ms:.0f} ms**/lần (CPU)")
+    st.caption(" · ".join(phan))
+
+
 def tab_video_noi_dung(conf, chu_ky, khung_moi_giay):
     tep_video = st.file_uploader("Chọn video công trường từ máy tính", type=["mp4", "avi", "mov", "mkv"])
     if tep_video is None:
@@ -841,17 +955,26 @@ def tab_video_noi_dung(conf, chu_ky, khung_moi_giay):
                 "khoảnh khắc vi phạm và nhật ký cảnh báo.", icon=":material/video_file:")
         return
     duoi = Path(tep_video.name).suffix.lower()
+    chon = st.pills("Chạy thêm mô hình để so sánh", list(MO_HINH_SO_SANH), selection_mode="multi",
+                    default=list(MO_HINH_SO_SANH), key="mo_hinh_so_sanh",
+                    help=f"Cùng bộ dữ liệu và cùng cách huấn luyện với {TEN_MO_HINH_CHINH}. Mỗi mô hình ra thêm một "
+                         f"video kết quả; trạng thái, biểu đồ và nhật ký vẫn tính theo {TEN_MO_HINH_CHINH}.")
     giay = thoi_luong_video(tep_video.file_id, duoi, tep_video.getvalue())
     if giay:
-        # máy chủ miễn phí chỉ có CPU: khoảng 2–6 lần độ dài video khi phân tích 4 lần mỗi giây
-        he_so = khung_moi_giay / 4
+        # máy chủ miễn phí chỉ có CPU: khoảng 2–6 lần độ dài video khi phân tích 4 lần mỗi giây bằng YOLOv11n;
+        # mỗi mô hình so sánh cộng thêm theo độ nặng (GFLOPs) của nó
+        he_so = khung_moi_giay / 4 * (1 + sum(MO_HINH_SO_SANH[t][1] for t in chon))
         it, nhieu = max(1, round(giay * 2 * he_so / 60)), max(1, round(giay * 6 * he_so / 60))
         st.caption(f"Video dài **{dinh_dang_thoi_luong(giay)}**, được phân tích toàn bộ nên video kết quả dài "
-                   f"đúng bằng video gốc. Máy chủ miễn phí chỉ có CPU, ước tính mất khoảng **{it}–{nhieu} phút**. "
-                   "Đừng đổi cài đặt trong lúc phân tích vì trang sẽ chạy lại và dừng phân tích.")
+                   "đúng bằng video gốc. Máy chủ miễn phí chỉ có CPU, ước tính mất khoảng "
+                   + (f"**{it} phút**" if it == nhieu else f"**{it}–{nhieu} phút**")
+                   + (f" (gồm cả {' và '.join(chon)})" if chon else "")
+                   + ". Đừng đổi cài đặt trong lúc phân tích vì trang sẽ chạy lại và dừng phân tích.")
     if st.button("Phân tích video", type="primary", icon=":material/play_arrow:"):
         thanh = st.progress(0.0, text="Đang chuẩn bị…")
-        kq = phan_tich_video(tep_video.getvalue(), tep_video.name, conf, chu_ky, khung_moi_giay, thanh)
+        mo_hinh_khac = {t: nap_mo_hinh_so_sanh()[t] for t in chon} if chon else {}
+        kq = phan_tich_video(tep_video.getvalue(), tep_video.name, conf, chu_ky, khung_moi_giay, thanh,
+                             mo_hinh_khac)
         thanh.empty()
         if kq is None:
             st.error("Không đọc được video. Hãy thử file .mp4 khác.", icon=":material/error:")
@@ -868,18 +991,34 @@ def tab_video_noi_dung(conf, chu_ky, khung_moi_giay):
         with st.container(key="video_goc"):
             st.video(ban_xem_truoc(tep_video.file_id, duoi, tep_video.getvalue()))
     with ket_qua:
-        st.markdown("**:material/verified_user: Video đã phân tích**")
+        st.markdown(f"**:material/verified_user: {TEN_MO_HINH_CHINH}** · mô hình chính")
         if kq:
             with st.container(key="video_ket_qua"):
                 st.video(kq["video"], muted=True)  # không có tiếng; tiếng phát từ video gốc
+            ms = sorted(m for _, m in kq.get("thoi_gian_suy_luan", []))
+            tom_tat_mo_hinh(kq["vp_frames"], kq["frames"], kq.get("ty_le_tuan_thu"),
+                            ms[len(ms) // 2] if ms else None)
         else:
             st.info("Bấm **Phân tích video** để xem video có đánh dấu công nhân và cảnh báo.",
                     icon=":material/play_circle:")
     if not kq:
         return
 
-    tao_dong_bo_video()(key="dong_bo_video", data={"lop": ["st-key-video_goc", "st-key-video_ket_qua"]})
-    st.caption("Hai video phát cùng lúc: bấm phát, tạm dừng hoặc tua ở một video thì video kia làm theo.")
+    khac = kq.get("mo_hinh_khac", {})
+    if khac:
+        cot = st.columns(2, gap="medium")
+        for i, (ten_mh, k) in enumerate(khac.items()):
+            with cot[i % 2]:
+                st.markdown(f"**:material/compare: {ten_mh}** · mô hình so sánh")
+                with st.container(key=f"video_so_sanh_{i}"):
+                    st.video(k["video"], muted=True)
+                tom_tat_mo_hinh(k["vp_frames"], kq["frames"], k["ty_le_tuan_thu"], k["ms_trung_vi"])
+    lop = ["st-key-video_goc", "st-key-video_ket_qua", *(f"st-key-video_so_sanh_{i}" for i in range(len(khac)))]
+    tao_dong_bo_video()(key=f"dong_bo_video_{len(lop)}", data={"lop": lop})
+    st.caption(("Các video" if khac else "Hai video") + " phát cùng lúc: bấm phát, tạm dừng hoặc tua ở một video thì "
+               + ("các video còn lại" if khac else "video kia") + " làm theo."
+               + (f" Tên mô hình ghi ở góc dưới bên trái mỗi video. Trạng thái, biểu đồ và nhật ký bên dưới tính "
+                  f"theo {TEN_MO_HINH_CHINH}." if khac else ""))
     with st.container(border=True):
         mo_ta = f"{kq['vp_frames']}/{kq['frames']} khung hình có công nhân thiếu đồ bảo hộ"
         if kq["vp_frames"]:
@@ -1053,8 +1192,7 @@ def trang_mo_hinh():
     df = bd.doc_ket_qua_huan_luyen()
     test = bd.DANH_GIA["test"]
     hero("Đánh giá mô hình · YOLOv11n", "Hiệu năng mô hình",
-         f"Mô hình phiên bản 2: huấn luyện lại 50 epoch sau khi thêm {bd.SO_ANH_THEM} ảnh tự gán nhãn, đánh giá "
-         "trên hai tập dữ liệu chưa dùng để huấn luyện: tập kiểm định (val) và tập kiểm tra (test).",
+         "YOLOv11n tinh chỉnh 50 epoch trên bộ dữ liệu PPE, đánh giá trên hai tập dữ liệu chưa dùng để huấn luyện: tập kiểm định (val) và tập kiểm tra (test).",
          [(bd.phan_tram(test["all"][2]), "mAP50 trên tập kiểm tra"),
           (bd.phan_tram(test["all"][3]), "mAP50-95 trên tập kiểm tra"),
           (f"{round(df['time'].iloc[-1] / 60)} phút", "thời gian huấn luyện"),
@@ -1074,40 +1212,17 @@ def trang_mo_hinh():
     st.caption(f"{so_vn(so['anh'])} ảnh, {so_vn(so['doi_tuong'])} đối tượng gắn nhãn · tốc độ suy luận "
                f"{str(so['toc_do_ms']).replace('.', ',')} ms/ảnh trên RTX 3050.")
 
-    # --- so với phiên bản trước
-    muc("Phiên bản", "Mô hình mới so với mô hình cũ",
-        f"Phiên bản 2 được huấn luyện lại từ đầu sau khi thêm {bd.SO_ANH_THEM} ảnh tự gán nhãn vào tập huấn luyện "
-        f"({so_vn(bd.SO_ANH['Huấn luyện'] - bd.SO_ANH_THEM)} → {so_vn(bd.SO_ANH['Huấn luyện'])} ảnh). "
-        "Cả hai phiên bản được chấm trên cùng tập kiểm định và kiểm tra.")
-    ht = bd.HE_THONG
-    v1, v2 = ht["v1"], ht["v2"]
-    with st.container(horizontal=True, gap="small"):
-        for ten, a, b, mau, giai_thich in [
-            (f"mAP50 ({bd.TEN_TAP[tap].split(' (')[0].lower()})", bd.DANH_GIA_V1[tap]["all"][2], so["all"][2],
-             "normal", "Chỉ số nhận diện tổng của 9 lớp trên tập đang chọn."),
-            ("Người vi phạm bắt được", v1["bat_duoc"] / ht["vi_pham"], v2["bat_duoc"] / ht["vi_pham"], "normal",
-             f"Trong {so_vn(ht['vi_pham'])} công nhân thật sự thiếu đồ bảo hộ trên tập kiểm tra."),
-            ("Người đạt chuẩn bị báo nhầm", v1["bao_nham"] / ht["dat_chuan"], v2["bao_nham"] / ht["dat_chuan"],
-             "inverse", f"Trong {ht['dat_chuan']} công nhân thật sự đủ 4 trang bị. Càng thấp càng tốt."),
-            ("Ảnh kết luận đúng", v1["anh_dung"] / ht["so_anh"], v2["anh_dung"] / ht["so_anh"], "normal",
-             f"Có / không cảnh báo, trên {ht['so_anh']} ảnh kiểm tra."),
-        ]:
-            st.metric(ten, bd.phan_tram(b), delta=f"{(b - a) * 100:+.1f} điểm so với v1".replace(".", ","),
-                      delta_color=mau, help=giai_thich, border=True, width="stretch")
-    st.caption("Ba ô cuối đo kết luận đủ / thiếu trang bị của từng công nhân (logic của hệ thống) trên tập kiểm "
-               "tra, đối chiếu với kết luận rút ra từ nhãn thật.")
-    chi_so_pb = st.pills("Chỉ số", list(bd.CHI_SO), default="mAP50", required=True, key="chi_so_phien_ban")
-    nhan_xet(f"Mức thay đổi nhỏ: {bd.SO_ANH_THEM} ảnh chỉ tăng khoảng "
-             f"{bd.phan_tram(bd.SO_ANH_THEM / (bd.SO_ANH['Huấn luyện'] - bd.SO_ANH_THEM))} dữ liệu huấn luyện, và hai "
-             "lần huấn luyện trên cùng dữ liệu vốn đã lệch nhau khoảng ±0,5 điểm mAP. Rõ nhất là hai lớp vi phạm trên "
-             "tập kiểm tra: <b>Không giày</b> (+6,0 điểm mAP50) và <b>Không mũ</b> (+3,8 điểm). Ảnh mới đều nằm trong "
-             "tập huấn luyện nên các số này chưa đo được mức cải thiện trên chính loại ảnh của nhóm.")
-    with st.container(border=True):
-        bieu_do(bd.bd_so_sanh_phien_ban(tap, chi_so_pb))
-    with st.expander("Xem bảng so sánh theo lớp", icon=":material/table_view:"):
-        bang = bd.bang_so_sanh_phien_ban(tap)
-        st.dataframe(bang.style.format({c: "{:.3f}" for c in bang.columns if c.endswith(("v1", "v2"))}),
-                     hide_index=True, width="stretch")
+    # --- biểu đồ gốc
+    muc("Ultralytics", "Biểu đồ đánh giá gốc",
+        f"Do Ultralytics tạo ra khi chạy <code>model.val()</code> trên tập {bd.TEN_TAP[tap].lower()}.")
+    tabs = st.tabs([ten for ten, _ in ANH_ULTRALYTICS.values()] + ["Kết quả huấn luyện"])
+    for t, (tep, (_, giai_thich)) in zip(tabs, ANH_ULTRALYTICS.items()):
+        with t:
+            st.caption(giai_thich)
+            st.image(str(bd.THU_MUC / tap / tep), width="stretch")
+    with tabs[-1]:
+        st.caption("Tổng hợp loss và chỉ số theo epoch do Ultralytics vẽ (results.png).")
+        st.image(str(bd.THU_MUC / "results.png"), width="stretch")
 
     # --- theo từng lớp
     muc("Theo từng lớp", "Hiệu năng của 9 lớp đối tượng",
@@ -1157,18 +1272,6 @@ def trang_mo_hinh():
                               (f"mAP50 cao nhất (epoch {int(tot_nhat['epoch'])})",
                                bd.phan_tram(tot_nhat["metrics/mAP50(B)"]))]:
             st.metric(nhan, gia_tri, border=True, width="stretch")
-
-    # --- biểu đồ gốc
-    muc("Ultralytics", "Biểu đồ đánh giá gốc",
-        f"Do Ultralytics tạo ra khi chạy <code>model.val()</code> trên tập {bd.TEN_TAP[tap].lower()}.")
-    tabs = st.tabs([ten for ten, _ in ANH_ULTRALYTICS.values()] + ["Kết quả huấn luyện"])
-    for t, (tep, (_, giai_thich)) in zip(tabs, ANH_ULTRALYTICS.items()):
-        with t:
-            st.caption(giai_thich)
-            st.image(str(bd.THU_MUC / tap / tep), width="stretch")
-    with tabs[-1]:
-        st.caption("Tổng hợp loss và chỉ số theo epoch do Ultralytics vẽ (results.png).")
-        st.image(str(bd.THU_MUC / "results.png"), width="stretch")
     chan_trang()
 
 
